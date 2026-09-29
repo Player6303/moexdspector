@@ -1,0 +1,19 @@
+name: moexdspector
+version: 1.0.1
+main: com.moexd.spector.MoexdSpectorPlugin
+api-version: '26.2'
+folia-supported: true
+author: moexd
+description: AFK-aware spectator rotation plugin for Folia
+commands:
+  spector:
+    description: Observe a player, or rotate through players randomly.
+    usage: /spector <player|random|next|pre|status|afk|off>
+    permission: moexdspector.use
+permissions:
+  moexdspector.use:
+    description: Allows use of /spector
+    default: op
+  moexdspector.admin:
+    description: 管理侧操作：/spector reload、强制断开他人会话
+    default: op

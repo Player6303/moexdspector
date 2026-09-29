@@ -1,0 +1,85 @@
+# moexdspector 配置文件（逻辑配置）
+# 全部可读文本（提示/原因/反馈文案）在 lang/zh_cn.yml
+
+# 语言文件（位于 plugins/moexdspector/lang/ 目录）
+lang: "zh_cn"
+
+check:
+  # 检测采样间隔（tick），每 20 tick = 1 秒
+  interval-ticks: 20
+  # 同一地点静止不动（且不在容器/背包界面）超过该秒数判定为挂机
+  stationary-seconds: 15
+  # 打开背包/箱子等容器界面超过该秒数判定为挂机（即使视角在动）
+  container-seconds: 30
+  # 被观察玩家死亡后是否在复活时自动附身回去
+  respawn-reattach: true
+  # 复活附身回去的等待窗口（秒），超时复活则不再回去
+  respawn-reattach-seconds: 3
+  # 观察者意外脱离观察状态（改模式/视角分离等，跨服与死亡除外）后，
+  # 超过该秒数仍未恢复则立即重新附身到可选玩家（跨服开启时优先本服，本服无人则跨服选人）
+  detach-reattach-seconds: 1
+  # 掉线不空窗（重连附身）总开关，默认关闭：
+  #   开启后目标掉线立即切到下一位玩家继续观察，宽限期内重连自动切回（桥接目标不占用本轮名额）；
+  #   关闭时目标掉线立即结束观察会话（跨服跟随不受影响，仍走裁决状态）
+  relogin-reattach: false
+  # 掉线重连宽限（秒）：仅在 relogin-reattach: true 时生效
+  relogin-grace-seconds: 30
+  # 连点器检测：位置在移动、但视角完全不动、且持续重复同一动作
+  # 连续满足的采样次数达到 streak 且窗口内累计挥手/交互次数达到 min-actions 判定为挂机
+  autoclicker-streak: 5
+  autoclicker-min-actions: 15
+  # 锁定观察者输入：通过 /spector 进入观察后，禁止 Shift 退出附身、左键切换附身对象等
+  # 意外脱离（主动 /gamemode 仍视为主动接管相机）。需要旁观菜单自由切换时可关闭
+  lock-spectate: true
+
+# 观察切换时的画面反馈（Title + ActionBar），文本支持 MiniMessage 格式
+
+ 
+feedback:
+  # 画面反馈（Title + ActionBar）；文本与原因文案见 lang/zh_cn.yml 的 feedback 段
+  enabled: true
+  title-enabled: true
+  # Title 停留时长（tick）
+  title-stay-ticks: 40
+  actionbar-enabled: true
+random:
+  # /spector random 模式下每次切换观察对象的间隔（秒）
+  interval-seconds: 60
+
+chat:
+  # 是否启用“打字挂机”检测
+  # 说明：原版协议没有键盘输入/聊天框开关的 API（客户端不发包），无法直接感知“正在打字”，
+  # 因此采用降级信号：以最近一条聊天消息作为“打字中”，信号有效期内持续静止则切换。
+  enabled: true
+  # 处于打字状态后，持续静止（无位移、无视角变化）超过该秒数则切换观察对象
+  typing-idle-seconds: 10
+  # 降级信号有效期：最近发出聊天消息的多少秒内视为“打字中”
+  recent-window-seconds: 60
+
+exclude:
+  # 是否跳过 NPC（Citizens 等插件会给实体加 "NPC" metadata，命中则不作为观察对象）
+  skip-npc: true
+  # 是否跳过隐身玩家（Essentials 系 /vanish 会打 "vanished" metadata）
+  skip-vanished: true
+  # 自定义豁免权限节点：拥有该权限的玩家不会被观察/检测，也不会进入候选池。
+  # 留空表示关闭（默认关闭）。例如: "moexdspector.pass"
+  permission: ""
+
+velocity:
+  # 是否启用 Velocity 跨服跟随（需在 Velocity 代理端安装 moexdspector-velocity 附属插件，
+  # 并在 velocity.toml 中使用 modern 转发模式）
+  enabled: false
+  # 本服务器在 Velocity 网络中的唯一 id，用于跨服会话记录
+  server-id: "lobby"
+  # 共享密钥：须与 Velocity 端 moexdspector.properties 中的 secret 一致，用于防伪造消息
+  secret: "change-me"
+
+
+# 说明：
+#  - 挂机判定 1：同一点位静止且视角不动，未打开任何界面，超过 stationary-seconds 秒。
+#  - 挂机判定 2：打开背包/箱子等容器界面（以 InventoryOpenEvent 为准）超过 container-seconds 秒。
+#    容器内视角发生移动会重置该计时（视为仍在操作）；视角完全不动超过阈值才判定挂机。
+#    （原版客户端打开自身背包不会通知服务端，因此自身背包以点击行为视为活跃；容器界面检测完全支持）
+#  - 挂机判定 3：位置持续移动，但视角完全不变，且持续执行同一动作（连续挥手/连点），视为连点器挂机。
+#  - 视角任何移动、位置移动（无冻结视角+连点特征）、容器内点击均会重置计时。
+#  - 不使用任何数据库，随机轮换的去重记录仅保存在内存中，重启后重新开始。
