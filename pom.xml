@@ -6,7 +6,7 @@
 
     <groupId>com.moexd</groupId>
     <artifactId>moexdspector-parent</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
     <packaging>pom</packaging>
 
     <name>moexdspector</name>

@@ -16,10 +16,12 @@ public final class MoexdSpectorPlugin extends JavaPlugin {
     private ObservationManager observationManager;
     private com.moexd.spector.velocity.VelocityBridge velocityBridge;
     private FileConfiguration langConfig;
+    private org.bukkit.configuration.file.FileConfiguration velocityConfig;
     @Override
     public void onEnable() {
         saveDefaultConfig();
         loadLang();
+        loadVelocityConfig();
         loadPassList();
         this.observationManager = new ObservationManager(this);
 
@@ -117,6 +119,17 @@ public final class MoexdSpectorPlugin extends JavaPlugin {
         return langConfig.getString("feedback.title-subtitle", "<gray>%reason%");
     }
 
+    /** 附身期间是否持续显示 ActionBar（config.feedback.hold-actionbar） */
+    public boolean feedbackHoldActionBarEnabled() {
+        return feedbackEnabled() && getConfig().getBoolean("feedback.hold-actionbar", true);
+    }
+
+    /** 附身期间持续 ActionBar 文本（lang 的 feedback.hold-actionbar-text，MiniMessage） */
+    public String feedbackHoldActionBarText() {
+        return langConfig.getString("feedback.hold-actionbar-text",
+                "<gray>当前观察玩家: <white><bold>%target%</bold> <dark_gray>· %mode%");
+    }
+
     public String feedbackActionBarText() {
         return langConfig.getString("feedback.actionbar-text",
                 "<gray>观察中: <white>%target% <dark_gray>· %reason% · %mode%");
@@ -140,10 +153,11 @@ public final class MoexdSpectorPlugin extends JavaPlugin {
             "handoff", "跨服跟随"
     );
 
-    /** /spector reload：重载 config.yml、语言文件与 pass_player.yml */
+    /** /spector reload：重载 config.yml、velocity.yml、语言文件与 pass_player.yml */
     public void reloadConfigs() {
         reloadConfig();
         loadLang();
+        loadVelocityConfig();
         loadPassList();
     }
 
@@ -176,6 +190,30 @@ public final class MoexdSpectorPlugin extends JavaPlugin {
         }
         this.langConfig = yaml;
         getLogger().info("语言文件已加载: lang/" + lang + ".yml");
+    }
+
+    /** 加载 Velocity 跨服配置（velocity.yml，独立于 config.yml） */
+    private void loadVelocityConfig() {
+        java.io.File file = new java.io.File(getDataFolder(), "velocity.yml");
+        if (!file.exists()) {
+            saveResource("velocity.yml", false);
+        }
+        this.velocityConfig = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(file);
+        getLogger().info("Velocity 跨服配置已加载: enabled="
+                + velocityConfig.getBoolean("enabled", false)
+                + " server-id=" + velocityConfig.getString("server-id", "unknown"));
+    }
+
+    public boolean velocityEnabled() {
+        return velocityConfig != null && velocityConfig.getBoolean("enabled", false);
+    }
+
+    public String velocityServerId() {
+        return velocityConfig != null ? velocityConfig.getString("server-id", "unknown") : "unknown";
+    }
+
+    public String velocitySecret() {
+        return velocityConfig != null ? velocityConfig.getString("secret", "change-me") : "change-me";
     }
 
     /** 打字挂机：静止超过该时长切换（打字信号有效期内） */

@@ -20,7 +20,7 @@ check:
   detach-reattach-seconds: 1
   # 掉线不空窗（重连附身）总开关，默认关闭：
   #   开启后目标掉线立即切到下一位玩家继续观察，宽限期内重连自动切回（桥接目标不占用本轮名额）；
-  #   关闭时目标掉线立即结束观察会话（跨服跟随不受影响，仍走裁决状态）
+  #   关闭时目标掉线立即切换到下一位玩家继续观察（不等待重连）；跨服掉线经代理裁决后同样处理
   relogin-reattach: false
   # 掉线重连宽限（秒）：仅在 relogin-reattach: true 时生效
   relogin-grace-seconds: 30
@@ -42,6 +42,8 @@ feedback:
   # Title 停留时长（tick）
   title-stay-ticks: 40
   actionbar-enabled: true
+  # 附身期间是否持续显示 ActionBar（每 2 秒刷新；文本见 lang 的 hold-actionbar-text）
+  hold-actionbar: true
 random:
   # /spector random 模式下每次切换观察对象的间隔（秒）
   interval-seconds: 60
@@ -64,15 +66,6 @@ exclude:
   # 自定义豁免权限节点：拥有该权限的玩家不会被观察/检测，也不会进入候选池。
   # 留空表示关闭（默认关闭）。例如: "moexdspector.pass"
   permission: ""
-
-velocity:
-  # 是否启用 Velocity 跨服跟随（需在 Velocity 代理端安装 moexdspector-velocity 附属插件，
-  # 并在 velocity.toml 中使用 modern 转发模式）
-  enabled: false
-  # 本服务器在 Velocity 网络中的唯一 id，用于跨服会话记录
-  server-id: "lobby"
-  # 共享密钥：须与 Velocity 端 moexdspector.properties 中的 secret 一致，用于防伪造消息
-  secret: "change-me"
 
 
 # 说明：

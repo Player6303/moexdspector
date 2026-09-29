@@ -1,0 +1,11 @@
+# moexdspector Velocity 跨服配置
+# 需在 Velocity 代理端安装 moexdspector-velocity 附属插件，并使用 modern 转发模式。
+
+# 是否启用跨服跟随
+enabled: false
+
+# 本服务器在 Velocity 网络中的唯一 id，用于跨服会话记录（各后端不得重复）
+server-id: "lobby"
+
+# 共享密钥：须与 Velocity 端 moexdspector.properties 中的 secret 一致，用于防伪造消息
+secret: "change-me"

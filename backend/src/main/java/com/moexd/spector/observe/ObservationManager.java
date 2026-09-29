@@ -10,6 +10,7 @@ import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 
 import java.util.ArrayDeque;
+import java.util.HashSet;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -114,10 +115,20 @@ public final class ObservationManager {
     // 会话建立 / 结束
     // ------------------------------------------------------------------
 
+    /** 替换会话且新会话将继续旁观时使用：跳过旧会话的 gamemode 还原，
+     * 避免"还原生存→再切旁观"的同 tick 抖动导致客户端丢失 camera 包 */
+    private void stopForReplaceLocked(UUID observerId) {
+        ObserverSession old = sessions.get(observerId);
+        if (old != null) {
+            old.previousGamemode = null;
+        }
+        stopSessionLocked(observerId, true);
+    }
+
     /** /spector <玩家ID>：为该观察者建立（或替换）会话 */
     public void startManual(Player observer, Player target) {
         synchronized (lock) {
-            stopSessionLocked(observer.getUniqueId(), true);
+            stopForReplaceLocked(observer.getUniqueId());
             ObserverSession session = newSessionLocked(observer, ObserverSession.Mode.MANUAL);
             if (beginWatchingLocked(observer, session, target,
                     plugin.msg("observing", "%target%", target.getName()))) {
@@ -145,7 +156,7 @@ public final class ObservationManager {
     /** /spector random */
     public void startRandom(Player observer) {
         synchronized (lock) {
-            stopSessionLocked(observer.getUniqueId(), true);
+            stopForReplaceLocked(observer.getUniqueId());
             ObserverSession session = newSessionLocked(observer, ObserverSession.Mode.RANDOM);
             observer.sendMessage(plugin.msg("observing-random",
                     "%interval%", String.valueOf(plugin.getConfig().getInt("random.interval-seconds", 60))));
@@ -158,7 +169,7 @@ public final class ObservationManager {
                 return;
             }
             if (crossServer()) {
-                String used = usedCsv(session);
+                String used = composeExcludedCsv(usedCsv(session), sessions.keySet());
                 endSessionKeepPairLocked(session);
                 sendObserveAndArmTimeout(observer, SpectorProtocol.MODE_RANDOM, "*", used);
             } else {
@@ -261,8 +272,10 @@ public final class ObservationManager {
         cancelTask(session.rotationTask);
         cancelTask(session.watchdogTask);
         cancelTask(session.reloginExpiryTask);
+        cancelTask(session.holdActionBarTask);
         cancelTask(session.pendingVerdictTask);
         session.victimExpiryTask = null;
+        session.holdActionBarTask = null;
         session.rotationTask = null;
         session.watchdogTask = null;
         session.reloginExpiryTask = null;
@@ -363,6 +376,7 @@ public final class ObservationManager {
     private boolean beginWatchingLocked(Player observer, ObserverSession session, Player target, String message) {
         observer.sendMessage(message);
         session.currentTargetId = target.getUniqueId();
+        session.afkNoCandidateTarget = null;
         addWatcherLocked(session.currentTargetId, session.observerId);
         if (!acquireMonitorLocked(session.currentTargetId)) {
             // 目标在选中与建立监测之间退出
@@ -371,9 +385,10 @@ public final class ObservationManager {
         }
         if (!session.voluntary) {
             makeSpectating(observer);
-            attachCamera(observer, target);
+            attachCamera(session, observer, target);
         }
         startWatchdogLocked(session, observer);
+        startHoldActionBarLocked(session, observer);
         session.detachedSince = -1;
         // teleportAsync 完成需要时间，给看门狗留出宽限期
         session.attachGraceUntil = System.currentTimeMillis() + attachGraceMillis();
@@ -385,9 +400,48 @@ public final class ObservationManager {
         return Math.max(3000L, plugin.detachReattachMillis() * 3);
     }
 
-    /** 观察者进入旁观模式并贴近目标 */
-    private void attachCamera(Player observer, Player target) {
-        observer.teleportAsync(target.getLocation());
+    /**
+     * 绑定观察者到目标的玩家视角（setSpectatorTarget，客户端跟随其视角而非仅贴身）。
+     * 调用方可能处于目标（而非观察者）的区域线程（如 AFK 切换路径），
+     * 因此绑定调度到观察者自己的 EntityScheduler 执行，保证线程归属正确。
+     * 跨服落地后客户端可能仍处于登录/维度同步阶段，camera 包会被后续位置包覆盖
+     * （服务端视角看已绑定、看门狗无法察觉），因此在 20/40 tick 后幂等重发两次。
+     * 目标自身为旁观者时原版不允许绑定，回退为贴身传送。
+     */
+    private void attachCamera(ObserverSession session, Player observer, Player target) {
+        UUID targetId = target.getUniqueId();
+        // 首次绑定也必须调度到观察者线程：AFK 切换等路径从目标区域线程发起，
+        // 同步调用 setSpectatorTarget 属跨线程实体操作（Folia 下失败，只剩贴身传送）
+        observer.getScheduler().run(plugin, t -> bind(observer, targetId, false),
+                () -> { /* 观察者退出时任务自动结束 */ });
+        // 跨服/重生场景的重发（幂等，setSpectatorTarget 重复调用无副作用）
+        for (long delay : new long[]{20L, 40L}) {
+            observer.getScheduler().runDelayed(plugin, t -> bind(observer, targetId, true),
+                    () -> { /* 观察者退出时任务自动结束 */ }, delay);
+        }
+    }
+
+    /** 单次绑定尝试；reassert 时先复核会话仍在观察该目标（切换后不再抢绑） */
+    private void bind(Player observer, UUID targetId, boolean reassert) {
+        Player tgt = Bukkit.getPlayer(targetId);
+        if (tgt == null || !observer.isOnline()) {
+            return;
+        }
+        // 首次绑定也校验：调度到执行之间会话可能已切换目标（快速连续切换），
+        // 不校验会短暂绑到旧目标并触发一次多余的回退传送
+        synchronized (lock) {
+            ObserverSession s = sessions.get(observer.getUniqueId());
+            if (s == null || s.voluntary || !targetId.equals(s.currentTargetId)) {
+                return;
+            }
+        }
+        observer.setSpectatorTarget(tgt);
+        if (!reassert) {
+            Entity bound = observer.getSpectatorTarget();
+            if (bound == null || !bound.getUniqueId().equals(targetId)) {
+                observer.teleportAsync(tgt.getLocation());
+            }
+        }
     }
 
     private void makeSpectating(Player observer) {
@@ -408,6 +462,36 @@ public final class ObservationManager {
                 task -> watchObserver(observer, session.observerId),
                 () -> { /* 观察者退出时任务自动结束 */ },
                 20L, 20L);
+    }
+
+    /**
+     * 附身期间持续显示 ActionBar（每 2 秒刷新，观察者调度器）。
+     * 每次刷新时复核会话仍在、有目标且非主动接管（主动接管期间相机不在插件目标上，不显示）。
+     */
+    private void startHoldActionBarLocked(ObserverSession session, Player observer) {
+        cancelTask(session.holdActionBarTask);
+        session.holdActionBarTask = null;
+        if (!plugin.feedbackHoldActionBarEnabled()) {
+            return;
+        }
+        UUID observerId = session.observerId;
+        session.holdActionBarTask = observer.getScheduler().runAtFixedRate(plugin,
+                task -> {
+                    synchronized (lock) {
+                        ObserverSession current = sessions.get(observerId);
+                        if (current == null || current.voluntary || current.currentTargetId == null) {
+                            return;
+                        }
+                        Player tgt = Bukkit.getPlayer(current.currentTargetId);
+                        if (tgt == null) {
+                            return;
+                        }
+                        feedbackRenderer.holdActionBar(observer, tgt.getName(),
+                                current.mode == ObserverSession.Mode.RANDOM);
+                    }
+                },
+                () -> { /* 观察者退出时任务自动结束 */ },
+                40L, 40L);
     }
 
     private void watchObserver(Player observer, UUID observerId) {
@@ -441,6 +525,10 @@ public final class ObservationManager {
                     return;
                 }
                 attached = spectating != null && spectating.getUniqueId().equals(target.getUniqueId());
+                // 目标自身是旁观者时原版不允许绑定视角，贴身跟随即视为附身（防重附身循环）
+                if (!attached && target.getGameMode() == GameMode.SPECTATOR) {
+                    attached = true;
+                }
             }
             // 脱离状态：超过 detach 时限仍未恢复则重新附身
             if (attached) {
@@ -458,7 +546,7 @@ public final class ObservationManager {
             if (target != null) {
                 // 目标还在本服：直接重新附身回同一目标
                 makeSpectating(observer);
-                attachCamera(observer, target);
+                attachCamera(session, observer, target);
                 session.attachGraceUntil = now + attachGraceMillis();
                 observer.sendMessage(plugin.msg("lock-reattached"));
                 return;
@@ -471,7 +559,7 @@ public final class ObservationManager {
             if (crossServer()) {
                 // 本服没有可选玩家：经代理跨服选人（模式保持，随机模式沿用去重列表）
                 String modeStr = session.mode == ObserverSession.Mode.RANDOM ? SpectorProtocol.MODE_RANDOM : SpectorProtocol.MODE_MANUAL;
-                String used = usedCsv(session);
+                String used = composeExcludedCsv(usedCsv(session), sessions.keySet());
                 endSessionKeepPairLocked(session);
                 sendObserveAndArmTimeout(observer, modeStr, "*", used);
                 return;
@@ -559,7 +647,7 @@ public final class ObservationManager {
             if (target == null) {
                 return;
             }
-            org.bukkit.Location to = event.getTo();
+            Location to = event.getTo();
             if (to != null && to.getWorld() != null
                     && to.getWorld().equals(target.getWorld())
                     && to.toVector().distanceSquared(target.getLocation().toVector()) < 1.0) {
@@ -575,53 +663,105 @@ public final class ObservationManager {
      * 显式指令 = 回到插件控制的意图：重置主动接管状态；
      * 若正处于掉线等待/裁决状态，则放弃该掉线玩家——本会话内不再自动切回、不再进候选池。
      */
+    /**
+     * /spector next|pre：按玩家名字序在候选池中步进切换（无会话时从第一位开始观察）。
+     * 候选池 = 本服玩家 + 跨服缓存名（velocity 开启时，代理周期下发的全网名单），统一按名字排序。
+     * 显式指令 = 回到插件控制的意图：重置主动接管状态；放弃挂起的掉线等待/裁决。
+     * 步进到远程玩家时经代理观察（保留模式与去重列表）。
+     */
     public void stepObservation(Player observer, boolean forward) {
         synchronized (lock) {
             ObserverSession session = sessions.get(observer.getUniqueId());
             if (session != null) {
-                // 显式步进 = 回到插件控制的意图
                 session.voluntary = false;
-                // 放弃挂起的掉线等待/裁决：取消计时并加入本会话忽略名单
                 abandonPendingLocked(observer, session, session.pendingReloginTarget, true);
                 abandonPendingLocked(observer, session, session.pendingVerdictTarget, false);
             }
-            List<Player> ordered = orderedCandidatesLocked(observer.getUniqueId(),
-                    session != null ? session.ignoredTargets : Set.of());
-            if (ordered.isEmpty()) {
+            // 本服候选（可携带 UUID 级豁免/忽略过滤）
+            java.util.TreeMap<String, Player> localByName = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+            Set<UUID> ignored = session != null ? session.ignoredTargets : Set.of();
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                if (online.getUniqueId().equals(observer.getUniqueId())
+                        || sessions.containsKey(online.getUniqueId())
+                        || plugin.isExcluded(online)
+                        || ignored.contains(online.getUniqueId())) {
+                    continue;
+                }
+                localByName.put(online.getName(), online);
+            }
+            // 跨服候选：网络缓存名去掉"全部本服在线名"（含被豁免者——否则其名字会漏进远程名单，
+            // 经代理同服快速路径绕过本服豁免）与观察者本人。远程名无法做 UUID 级豁免过滤，属已知边界
+            java.util.TreeSet<String> remoteNames = new java.util.TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+            if (crossServer() && velocityBridge != null) {
+                java.util.Set<String> allLocalNames = new HashSet<>();
+                for (Player online : Bukkit.getOnlinePlayers()) {
+                    allLocalNames.add(online.getName().toLowerCase(java.util.Locale.ROOT));
+                }
+                for (String name : velocityBridge.networkPlayerNames()) {
+                    if (!allLocalNames.contains(name.toLowerCase(java.util.Locale.ROOT))
+                            && !name.equalsIgnoreCase(observer.getName())) {
+                        remoteNames.add(name);
+                    }
+                }
+            }
+            java.util.TreeSet<String> all = new java.util.TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+            all.addAll(localByName.keySet());
+            all.addAll(remoteNames);
+            if (all.isEmpty()) {
                 observer.sendMessage(plugin.msg("no-candidates"));
                 return;
             }
             if (session == null) {
-                // 无会话：从候选池第一位开始手动观察
-                Player first = ordered.get(0);
-                ObserverSession created = newSessionLocked(observer, ObserverSession.Mode.MANUAL);
-                if (beginWatchingLocked(observer, created, first,
-                        plugin.msg("observing", "%target%", first.getName()))) {
-                    sendFeedbackLocked(observer, created, first, "start");
+                // 无会话：从候选池第一位开始（本服直接建会话，远程走代理）
+                String first = all.first();
+                Player local = localByName.get(first);
+                if (local != null) {
+                    ObserverSession created = newSessionLocked(observer, ObserverSession.Mode.MANUAL);
+                    if (beginWatchingLocked(observer, created, local,
+                            plugin.msg("observing", "%target%", local.getName()))) {
+                        sendFeedbackLocked(observer, created, local, "start");
+                    } else {
+                        observer.sendMessage(plugin.msg("no-candidates"));
+                        stopSessionLocked(observer.getUniqueId(), true);
+                    }
                 } else {
-                    observer.sendMessage(plugin.msg("no-candidates"));
-                    stopSessionLocked(observer.getUniqueId(), true);
+                    sendObserveAndArmTimeout(observer, SpectorProtocol.MODE_MANUAL, first, "");
                 }
                 return;
             }
+            // 定位当前目标（本服按 UUID 解析名字，跨服会话目标离线时按名字匹配）
+            String currentName = session.currentTargetId != null ? targetNameOf(session.currentTargetId) : null;
+            List<String> ordered = new ArrayList<>(all);
             int idx = -1;
-            for (int i = 0; i < ordered.size(); i++) {
-                if (ordered.get(i).getUniqueId().equals(session.currentTargetId)) {
-                    idx = i;
-                    break;
+            if (currentName != null) {
+                for (int i = 0; i < ordered.size(); i++) {
+                    if (ordered.get(i).equalsIgnoreCase(currentName)) {
+                        idx = i;
+                        break;
+                    }
                 }
             }
             if (idx < 0) {
-                // 当前无目标（掉线等待等状态）：next 从第一位、pre 从最后一位开始
                 idx = forward ? -1 : 1;
             }
-            Player next = ordered.get(Math.floorMod(idx + (forward ? 1 : -1), ordered.size()));
-            if (next.getUniqueId().equals(session.currentTargetId)) {
-                // 候选池步进一圈仍回到自己：没有其他可观察玩家
+            String nextName = ordered.get(Math.floorMod(idx + (forward ? 1 : -1), ordered.size()));
+            if (currentName != null && nextName.equalsIgnoreCase(currentName)) {
+                // 步进一圈回到当前目标：没有其他可观察玩家
                 observer.sendMessage(plugin.msg("no-candidates"));
                 return;
             }
-            switchToLocked(session, next, plugin.msg("random-switch", "%target%", next.getName()), "manual");
+            Player localNext = localByName.get(nextName);
+            if (localNext != null) {
+                switchToLocked(session, localNext,
+                        plugin.msg("random-switch", "%target%", localNext.getName()), "manual");
+            } else {
+                // 远程玩家：保留模式与去重列表，经代理观察
+                String used = composeExcludedCsv(usedCsv(session), sessions.keySet());
+                String modeStr = session.mode == ObserverSession.Mode.RANDOM
+                        ? SpectorProtocol.MODE_RANDOM : SpectorProtocol.MODE_MANUAL;
+                endSessionKeepPairLocked(session);
+                sendObserveAndArmTimeout(observer, modeStr, nextName, used);
+            }
         }
     }
 
@@ -650,26 +790,17 @@ public final class ObservationManager {
                 + " target=" + pending);
     }
 
-    /** 候选池的确定性排序视图（含当前目标以便步进），排除豁免/观察者/本人/会话忽略名单 */
-    private List<Player> orderedCandidatesLocked(UUID observerId, Set<UUID> ignored) {
-        List<Player> candidates = new ArrayList<>();
-        for (Player online : Bukkit.getOnlinePlayers()) {
-            UUID id = online.getUniqueId();
-            if (!id.equals(observerId) && !sessions.containsKey(id) && !plugin.isExcluded(online)
-                    && !ignored.contains(id)) {
-                candidates.add(online);
-            }
-        }
-        candidates.sort(java.util.Comparator.comparing(Player::getName, String.CASE_INSENSITIVE_ORDER));
-        return candidates;
-    }
-
     // ------------------------------------------------------------------
     // 切换 / 轮换 / 挂机
     // ------------------------------------------------------------------
 
-    /** 切换某会话的观察对象；目标在切换瞬间退出时自动改选一次（须持有 lock） */
+    /**
+     * 切换某会话的观察对象；目标在切换瞬间退出时自动改选一次（须持有 lock）。
+     * 主动接管（voluntary）只是暂停相机——任何事件切换（挂机/掉线/死亡/轮换）
+     * 或手动切换（next/pre）都视为恢复插件完全接管：清除 voluntary，镜头随切换绑定。
+     */
     private boolean switchToLocked(ObserverSession session, Player newTarget, String reasonMessage, String feedbackReasonKey) {
+        session.voluntary = false;
         Player observer = Bukkit.getPlayer(session.observerId);
         if (observer == null) {
             stopSessionLocked(session.observerId, false);
@@ -749,16 +880,28 @@ public final class ObservationManager {
                         "%target%", targetNameOf(targetId), "%reason%", reason);
                 plugin.getLogger().info("观察对象 " + targetNameOf(targetId) + " 疑似挂机(" + reason + ")");
 
+                if (crossServer()) {
+                    // 跨服开启：挂机切换直接全网选人（本服玩家仍在候选池，同服命中走代理快速路径）。
+                    // 排除：去重名单(RANDOM) + 本次挂机目标 + 会话忽略名单 + 全部观察者
+                    Set<UUID> excluded = new HashSet<>(session.usedTargets);
+                    excluded.add(targetId);
+                    excluded.addAll(session.ignoredTargets);
+                    String used = composeExcludedCsv(csvOf(excluded), sessions.keySet());
+                    String modeStr = session.mode == ObserverSession.Mode.RANDOM
+                            ? SpectorProtocol.MODE_RANDOM : SpectorProtocol.MODE_MANUAL;
+                    endSessionKeepPairLocked(session);
+                    sendObserveAndArmTimeout(observer, modeStr, "*", used);
+                    continue;
+                }
+
                 if (session.mode == ObserverSession.Mode.MANUAL) {
                     Player next = pickCandidate(session, Set.of(targetId, observerId));
-                    if (next == null && crossServer()) {
-                        String used = usedCsv(session);
-                        endSessionKeepPairLocked(session);
-                        sendObserveAndArmTimeout(observer, SpectorProtocol.MODE_MANUAL, "*", used);
-                        continue;
-                    }
                     if (next == null) {
-                        observer.sendMessage(noCandidateMsg);
+                        // 同一目标持续挂机时只提醒一次（目标恢复活跃或切换后重置）
+                        if (!targetId.equals(session.afkNoCandidateTarget)) {
+                            session.afkNoCandidateTarget = targetId;
+                            observer.sendMessage(noCandidateMsg);
+                        }
                         continue;
                     }
                     switchToLocked(session, next, plugin.msg("afk-switch",
@@ -766,14 +909,12 @@ public final class ObservationManager {
                 } else {
                     session.usedTargets.add(targetId);
                     Player next = pickNextForRotation(session);
-                    if (next == null && crossServer()) {
-                        String used = usedCsv(session);
-                        endSessionKeepPairLocked(session);
-                        sendObserveAndArmTimeout(observer, SpectorProtocol.MODE_RANDOM, "*", used);
-                        continue;
-                    }
                     if (next == null) {
-                        observer.sendMessage(noCandidateMsg);
+                        // 同一目标持续挂机时只提醒一次（目标恢复活跃或切换后重置）
+                        if (!targetId.equals(session.afkNoCandidateTarget)) {
+                            session.afkNoCandidateTarget = targetId;
+                            observer.sendMessage(noCandidateMsg);
+                        }
                         continue;
                     }
                     switchToLocked(session, next, plugin.msg("random-switch-afk",
@@ -785,27 +926,79 @@ public final class ObservationManager {
 
     private void recordAfkLocked(String playerName, String reason) {
         recentAfk.addLast(new AfkRecord(playerName, reason, System.currentTimeMillis()));
-        while (recentAfk.size() > 20) {
+        while (recentAfk.size() > 50) {
             recentAfk.removeFirst();
         }
     }
 
-    /** /spector afk：近期挂机判定报告 */
+    /** /spector afk：挂机判定汇总（按玩家聚合：次数 + 最近一次原因与时间，按最近排序） */
     public List<String> afkReportLines() {
         synchronized (lock) {
             if (recentAfk.isEmpty()) {
                 return List.of(plugin.msg("afk-list-empty"));
             }
+            long now = System.currentTimeMillis();
+            Map<String, List<AfkRecord>> byPlayer = new java.util.LinkedHashMap<>();
+            for (AfkRecord record : recentAfk) {
+                byPlayer.computeIfAbsent(record.playerName(), k -> new ArrayList<>()).add(record);
+            }
+            List<Map.Entry<String, List<AfkRecord>>> entries = new ArrayList<>(byPlayer.entrySet());
+            entries.sort((a, b) -> Long.compare(
+                    b.getValue().get(b.getValue().size() - 1).at(),
+                    a.getValue().get(a.getValue().size() - 1).at()));
             List<String> lines = new ArrayList<>();
             lines.add(plugin.msg("afk-list-header"));
-            long now = System.currentTimeMillis();
-            for (AfkRecord record : recentAfk) {
+            for (Map.Entry<String, List<AfkRecord>> entry : entries) {
+                List<AfkRecord> records = entry.getValue();
+                AfkRecord latest = records.get(records.size() - 1);
                 lines.add(plugin.msg("afk-list-entry",
-                        "%player%", record.playerName(),
+                        "%player%", entry.getKey(),
+                        "%count%", String.valueOf(records.size()),
+                        "%reason%", latest.reason(),
+                        "%time%", String.valueOf(Math.max(0, (now - latest.at()) / 1000))));
+            }
+            return lines;
+        }
+    }
+
+    /** /spector afk <玩家ID>：该玩家的挂机判定明细（新到旧） */
+    public List<String> afkDetailLines(String playerName) {
+        synchronized (lock) {
+            List<AfkRecord> mine = new ArrayList<>();
+            for (AfkRecord record : recentAfk) {
+                if (record.playerName().equalsIgnoreCase(playerName)) {
+                    mine.add(record);
+                }
+            }
+            if (mine.isEmpty()) {
+                return List.of(plugin.msg("afk-detail-empty", "%target%", playerName));
+            }
+            long now = System.currentTimeMillis();
+            List<String> lines = new ArrayList<>();
+            lines.add(plugin.msg("afk-detail-header", "%target%", mine.get(mine.size() - 1).playerName()));
+            lines.add(plugin.msg("afk-detail-summary",
+                    "%count%", String.valueOf(mine.size()),
+                    "%span%", String.valueOf(Math.max(0, (now - mine.get(0).at()) / 1000))));
+            for (int i = mine.size() - 1; i >= 0; i--) {
+                AfkRecord record = mine.get(i);
+                lines.add(plugin.msg("afk-detail-entry",
                         "%reason%", record.reason(),
                         "%time%", String.valueOf(Math.max(0, (now - record.at()) / 1000))));
             }
             return lines;
+        }
+    }
+
+    /** Tab 补全：近期有挂机判定记录的玩家名 */
+    public List<String> afkKnownPlayers() {
+        synchronized (lock) {
+            List<String> names = new ArrayList<>();
+            for (AfkRecord record : recentAfk) {
+                if (!names.contains(record.playerName())) {
+                    names.add(record.playerName());
+                }
+            }
+            return names;
         }
     }
 
@@ -830,14 +1023,20 @@ public final class ObservationManager {
                 return;
             }
             session.usedTargets.add(session.currentTargetId);
-            Player next = pickNextForRotation(session);
-            if (next == null && crossServer()) {
-                // 本服已无可选玩家：经代理跨服选人
-                String used = usedCsv(session);
-                endSessionKeepPairLocked(session);
-                sendObserveAndArmTimeout(observer, SpectorProtocol.MODE_RANDOM, "*", used);
+            if (crossServer()) {
+                // 跨服轮换：本服"未观察"的玩家优先（命中即秒切），用尽后全网选人；
+                // 全网都观察过时由代理自动开启新一轮（保持"轮完才重复"）
+                Player next = pickCandidate(session, session.usedTargets);
+                if (next == null) {
+                    String used = composeExcludedCsv(usedCsv(session), sessions.keySet());
+                    endSessionKeepPairLocked(session);
+                    sendObserveAndArmTimeout(observer, SpectorProtocol.MODE_RANDOM, "*", used);
+                    return;
+                }
+                switchToLocked(session, next, plugin.msg("random-switch", "%target%", next.getName()), "rotate");
                 return;
             }
+            Player next = pickNextForRotation(session);
             if (next == null) {
                 return;
             }
@@ -883,6 +1082,18 @@ public final class ObservationManager {
         return candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
     }
 
+    /** UUID 集合转 CSV（跨服排除列表用） */
+    private static String csvOf(Set<UUID> ids) {
+        StringBuilder csv = new StringBuilder();
+        for (UUID id : ids) {
+            if (csv.length() > 0) {
+                csv.append(',');
+            }
+            csv.append(id);
+        }
+        return csv.toString();
+    }
+
     /** 组合跨服选人的排除列表：本轮去重名单 + 所有观察者（public 以便单测） */
     public static String composeExcludedCsv(String usedCsv, Set<UUID> observerIds) {
         StringBuilder csv = new StringBuilder(usedCsv == null ? "" : usedCsv);
@@ -915,8 +1126,9 @@ public final class ObservationManager {
     }
 
     private void sendPair(Player via, ObserverSession session) {
+        // 观察者身份取会话（via 仅是消息载体，可能是目标玩家——见 resumeHandoff 的借道回报）
         if (velocityBridge != null && session.currentTargetId != null) {
-            velocityBridge.sendPair(via, session.currentTargetId,
+            velocityBridge.sendPair(via, session.observerId, session.currentTargetId,
                     session.mode == ObserverSession.Mode.RANDOM ? SpectorProtocol.MODE_RANDOM : SpectorProtocol.MODE_MANUAL,
                     usedCsv(session));
         }
@@ -937,6 +1149,24 @@ public final class ObservationManager {
                 System.currentTimeMillis(), CheckSettings.from(plugin));
         if (result.verdict() != AfkRuleEvaluator.Verdict.NONE) {
             afkTriggered(targetId, result.reasonKey(), "%seconds%", result.secondsArg());
+        } else {
+            // 目标恢复活跃：解除"挂机但无候选人"的一次性提示标记，下次挂机可再提醒
+            clearAfkNoCandidate(targetId);
+        }
+    }
+
+    private void clearAfkNoCandidate(UUID targetId) {
+        synchronized (lock) {
+            Set<UUID> watchers = watchersByTarget.get(targetId);
+            if (watchers == null) {
+                return;
+            }
+            for (UUID watcherId : watchers) {
+                ObserverSession session = sessions.get(watcherId);
+                if (session != null && targetId.equals(session.afkNoCandidateTarget)) {
+                    session.afkNoCandidateTarget = null;
+                }
+            }
         }
     }
 
@@ -970,15 +1200,38 @@ public final class ObservationManager {
                 if (crossServer()) {
                     // 跨服退出不能立即桥接（否则 PAIR 会覆盖代理侧映射、破坏跟随）：
                     // 进入"等待裁决"状态，HANDOFF=跟随重建，TARGET_GONE=按掉线处理，
-                    // 重连桥接开启时宽限期内未裁决则兜底桥接，否则结束会话
+                    // 宽限期内未裁决则按掉线兜底
                     markVerdictAwaitLocked(session, playerId);
                 } else if (reloginActive()) {
                     markReloginAwaitLocked(session, playerId);
                 } else {
-                    stopSessionLocked(observerId, false);
+                    // 掉线不空窗（默认）：立即切到下一位玩家，不等待重连
+                    switchAfterTargetGoneLocked(session, playerId);
                 }
             }
         }
+    }
+
+    /**
+     * 目标确认掉线且不等待重连：立即切换到下一位玩家；无候选人则结束会话并还原 gamemode。
+     * （relogin-reattach 关闭时的路径；开启时走 markReloginAwaitLocked 的"桥接+等待切回"）
+     */
+    private void switchAfterTargetGoneLocked(ObserverSession session, UUID targetId) {
+        Player observer = Bukkit.getPlayer(session.observerId);
+        if (observer == null) {
+            stopSessionLocked(session.observerId, false);
+            return;
+        }
+        Player next = session.mode == ObserverSession.Mode.RANDOM
+                ? pickNextForRotation(session)
+                : pickCandidate(session, Set.of(targetId, session.observerId));
+        if (next != null) {
+            switchToLocked(session, next, plugin.msg("target-quit-switch",
+                    "%target%", targetNameOf(targetId), "%newtarget%", next.getName()), "bridge");
+            return;
+        }
+        observer.sendMessage(plugin.msg("no-candidates"));
+        stopSessionLocked(session.observerId, true);
     }
 
     /**
@@ -1005,8 +1258,8 @@ public final class ObservationManager {
                         plugin.getLogger().info("代理未在宽限期内裁决目标去向，按掉线处理: observer=" + observerId);
                         markReloginAwaitLocked(current, targetId);
                     } else {
-                        plugin.getLogger().info("代理未在宽限期内裁决目标去向且重连桥接未开启，结束会话: observer=" + observerId);
-                        stopSessionLocked(observerId, true);
+                        plugin.getLogger().info("代理未在宽限期内裁决目标去向，按掉线切换: observer=" + observerId);
+                        switchAfterTargetGoneLocked(current, targetId);
                     }
                 }
             }
@@ -1105,9 +1358,18 @@ public final class ObservationManager {
         }
     }
 
-    /** HANDOFF：观察者到达本服，观察对象为本服玩家，重建该观察者的会话 */
-    public void resumeHandoff(UUID observerId, Player target, String modeStr, List<UUID> used) {
+    /**
+     * HANDOFF：观察者到达本服，按显式 targetId 重建该观察者的会话。
+     * 目标 UUID 由消息携带（不依赖接收连接的玩家身份——消息可能经观察者连接到达）。
+     */
+    public void resumeHandoff(UUID observerId, UUID targetId, String modeStr, List<UUID> used) {
         synchronized (lock) {
+            Player target = Bukkit.getPlayer(targetId);
+            if (target == null) {
+                // HANDOFF 到达时目标必然在线；离线属异常，丢弃本次移交
+                plugin.getLogger().warning("HANDOFF 目标不在本服，丢弃移交: target=" + targetId);
+                return;
+            }
             // 该观察者已有本地会话则替换（跨服移交以代理侧为准）
             ObserverSession old = sessions.remove(observerId);
             if (old != null) {
@@ -1163,7 +1425,8 @@ public final class ObservationManager {
                     return;
                 }
                 makeSpectating(obs);
-                attachCamera(obs, tgt);
+                attachCamera(current, obs, tgt);
+                startHoldActionBarLocked(current, obs);
                 current.attachGraceUntil = System.currentTimeMillis() + attachGraceMillis();
                 startWatchdogLocked(current, obs);
                 obs.sendMessage(plugin.msg("handoff-followed", "%target%", tgt.getName()));
@@ -1172,11 +1435,12 @@ public final class ObservationManager {
         }, () -> { /* 观察者退出时任务自动结束 */ }, 2L);
     }
 
-    /** 目标在重连宽限期内回来：切回其视角，桥接目标重新回到随机候选池 */
+    /** 目标在重连宽限期内回来：切回其视角（事件接管，恢复插件相机控制），桥接目标重新回到随机候选池 */
     private void resumeReloginLocked(ObserverSession session, UUID targetId) {
         cancelTask(session.reloginExpiryTask);
         session.reloginExpiryTask = null;
         session.pendingReloginTarget = null;
+        session.voluntary = false;
         Player target = Bukkit.getPlayer(targetId);
         Player observer = Bukkit.getPlayer(session.observerId);
         if (target == null) {
@@ -1223,8 +1487,8 @@ public final class ObservationManager {
             if (reloginActive()) {
                 markReloginAwaitLocked(session, target);
             } else {
-                plugin.getLogger().info("观察对象已退出网络，结束观察会话");
-                stopSessionLocked(observer, true);
+                plugin.getLogger().info("观察对象已退出网络，切换到下一位玩家");
+                switchAfterTargetGoneLocked(session, target);
             }
         }
     }

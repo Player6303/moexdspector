@@ -46,6 +46,15 @@ final class FeedbackRenderer {
         }, () -> { /* 观察者退出时任务自动结束 */ });
     }
 
+    /** 持续 ActionBar（附身期间常驻显示）：直接发送，调用方须在观察者所属线程（定时任务内） */
+    void holdActionBar(Player observer, String targetName, boolean randomMode) {
+        if (!plugin.feedbackHoldActionBarEnabled()) {
+            return;
+        }
+        observer.sendActionBar(miniMessage(plugin.feedbackHoldActionBarText(), targetName, "",
+                randomMode ? "随机轮换" : "手动"));
+    }
+
     static Component miniMessage(String template, String target, String reason, String mode) {
         String replaced = template
                 .replace("%target%", target)

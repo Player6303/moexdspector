@@ -61,7 +61,8 @@ spector/
 │   └── src/
 │       ├── main/resources/
 │       │   ├── plugin.yml           # folia-supported: true, api-version 26.2
-│       │   ├── config.yml           # 逻辑配置（阈值 / Velocity / 豁免 / 反馈开关 / lang）
+│       │   ├── config.yml           # 逻辑配置（阈值 / 豁免 / 反馈开关 / lang）
+│       │   ├── velocity.yml         # Velocity 跨服配置（enabled / server-id / secret）
 │       │   ├── lang/zh_cn.yml       # 语言文件（全部可读文本，前缀 MoeXDSpector）
 │       │   └── pass_player.yml      # 豁免名单（玩家名或 UUID）
 │       ├── main/java/com/moexd/spector/
@@ -107,8 +108,8 @@ JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-25.0.3.9-hotspot" mvn package
 
 产物：
 
-- `backend/target/moexdspector-1.0.1.jar` —— Folia 后端插件
-- `velocity/target/moexdspector-velocity-1.0.1.jar` —— Velocity 附属插件
+- `backend/target/moexdspector-1.0.2.jar` —— Folia 后端插件
+- `velocity/target/moexdspector-velocity-1.0.2.jar` —— Velocity 附属插件
 
 > **两端必须同时更新**：消息帧带协议版本号校验，新旧版本混搭时跨服消息会被拒绝（日志有明确提示，不会静默错乱）。构建时自动运行协议契约一致性测试，防止两端 `SpectorProtocol.java` 漂移。
 
@@ -118,16 +119,16 @@ JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-25.0.3.9-hotspot" mvn package
 
 ### 单服务器（不跨服）
 
-1. 将 `moexdspector-1.0.1.jar` 放入 Folia 服务端 `plugins/` 目录；
+1. 将 `moexdspector-1.0.2.jar` 放入 Folia 服务端 `plugins/` 目录；
 2. 启动一次生成 `plugins/moexdspector/config.yml`、`lang/zh_cn.yml` 与 `pass_player.yml`，按需调整后重启；
-3. `velocity.enabled` 保持 `false` 即可，其余功能全部可用。
+3. 保持 `velocity.yml` 中 `enabled: false` 即可，其余功能全部可用。
 
 ### Velocity 跨服网络
 
 1. **每个** Folia 后端都安装后端插件，并为每个后端配置**唯一**的 `velocity.server-id`（如 `lobby`、`survival`、`creative`）；
-2. 所有后端将 `velocity.enabled` 设为 `true`；
+2. 所有后端将 `velocity.yml` 中 `enabled` 设为 `true`；
 3. 所有后端与 Velocity 端的**共享密钥保持一致**（见[安全性](#安全性)）；
-4. Velocity 端安装 `moexdspector-velocity-1.0.1.jar`，首次运行会在
+4. Velocity 端安装 `moexdspector-velocity-1.0.2.jar`，首次运行会在
    `plugins/config/moexdspector/moexdspector.properties` 生成默认配置，修改 `secret` 后重启；
 5. 确认 `velocity.toml` 使用 modern 转发模式。
 
@@ -139,11 +140,11 @@ JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-25.0.3.9-hotspot" mvn package
 
 | 指令 | 权限 | 说明 |
 | --- | --- | --- |
-| `/spector <玩家ID>` | use | 附身到目标玩家并开启挂机检测；检测到挂机时自动随机切换到另一名在线玩家并继续检测。**开启跨服后**：目标在其他服务器时，观察者会被自动传送过去并附身。目标在豁免名单中则拒绝。 |
-| `/spector random` | use | 开启随机轮换模式：按配置间隔切换观察对象；本轮内已观察过的玩家不会重复，全部轮完一遍后清空记录重新开始。**开启跨服后**：本服玩家轮完会自动跨服全网选人，去重列表跨服连续。 |
+| `/spector <玩家ID>` | use | **绑定到目标玩家视角**（旁观跟随其第一人称视角，非贴身传送）并开启挂机检测；检测到挂机时自动随机切换到另一名在线玩家并继续检测。**开启跨服后**：目标在其他服务器时，观察者会被自动传送过去并附身。目标在豁免名单中则拒绝。 |
+| `/spector random` | use | 开启随机轮换模式：按配置间隔切换观察对象；本轮内已观察过的玩家不会重复，全部轮完一遍后清空记录重新开始。**开启跨服后**：轮换优先选择本服"尚未观察"的玩家，用尽后**全网选人**；全网轮完一轮自动开启新一轮，去重列表跨服连续。挂机自动切换在跨服开启时同样全网选人（不再困在本服）。 |
 | `/spector next` / `/spector pre` | use | 手动步进：按玩家名字序切换到下一位/上一位可观察玩家（循环）。无会话时 `next` 从第一位开始观察。**显式意图**：会同时重置主动接管状态（恢复锁定与镜头控制）；若正处于掉线等待/裁决状态，则放弃该掉线玩家——本会话内不再自动切回、不再进候选池与步进列表。 |
 | `/spector status` | use | 查看当前会话状态：模式 / 当前观察目标 / 本轮已观察人数 / 同行观察者数量 / 相机接管状态 / 是否在等待掉线目标重连。 |
-| `/spector afk` | use | 查看近期挂机判定报告（最近 20 条：玩家、原因、多少秒前）。 |
+| `/spector afk [玩家ID]` | use | 挂机判定报告：不带参数显示**按玩家聚合**的汇总（每人次数 + 最近一次原因与时间，按最近排序）；带玩家ID显示该玩家的**逐条明细**（新到旧 + 汇总）。记录容量 50 条，Tab 补全支持历史玩家名。 |
 | `/spector off` | use | 停止**自己的**观察会话（不影响其他管理员），注销跨服会话，并**自动还原自己开始观察前的 gamemode**。 |
 | `/spector reload` | admin | 重载 `config.yml`、语言文件（`lang/`）与 `pass_player.yml`（改豁免名单/阈值/文案无需重启）。**不影响进行中的会话**：已在观察某玩家的会话继续，新候选池从下次选择起生效。 |
 | `/spector off <玩家>` | admin | 强制断开指定观察者的会话（可由控制台或其他管理员执行），并还原其 gamemode。**跨服生效**：通过代理转发到观察者所在的后端。 |
@@ -235,7 +236,8 @@ feedback:                          # 切换画面反馈开关；文本与原因�
   enabled: true                    # 总开关
   title-enabled: true              # 是否显示 Title
   title-stay-ticks: 40             # Title 停留时长（tick）
-  actionbar-enabled: true          # 是否显示 ActionBar
+  actionbar-enabled: true          # 是否显示 ActionBar（切换时）
+  hold-actionbar: true              # 附身期间持续显示 ActionBar（每 2 秒刷新，文本见 lang）
 
 random:
   interval-seconds: 60            # /spector random 轮换间隔
@@ -250,15 +252,22 @@ exclude:
   skip-vanished: true             # 跳过隐身玩家（"vanished" metadata）
   permission: ""                  # 自定义豁免权限节点，留空关闭
 
-velocity:
-  enabled: false                  # 是否启用跨服跟随
-  server-id: "lobby"              # 本服务器在 Velocity 网络中的唯一 id（各后端不得重复）
-  secret: "change-me"             # 共享密钥，与 Velocity 端 secret 一致，防伪造消息
-
-# 提示消息与挂机原因文案见 lang/zh_cn.yml（messages / reasons 段）
+# 跨服配置（velocity.yml）与提示文案（lang/zh_cn.yml）均为独立文件，见下文对应小节
 ```
 
-> **升级提示**：新版本新增的配置项不会自动合并进已有的 config.yml，删除旧文件重新生成或手动补齐（或用 `/spector reload` 前先补齐文件）。**文本已迁移至 lang/ 目录**：旧版 config.yml 中的 `messages`/`reasons` 段不再生效，请删除后让插件释放 `lang/zh_cn.yml` 并在其中修改文案。
+> **升级提示**：新增配置项不会自动合并进已有文件，删除旧文件重新生成或手动补齐。**两处迁移**：① 文本已迁至 `lang/` 目录（旧 config.yml 的 `messages`/`reasons` 段失效）；② 跨服配置已拆到独立的 `velocity.yml`（旧 config.yml 的 `velocity` 段失效，请让插件释放 `velocity.yml` 后在其中修改）。
+
+### velocity.yml（跨服配置）
+
+位于 `plugins/moexdspector/velocity.yml`，首次运行自动生成：
+
+```yaml
+enabled: false      # 是否启用跨服跟随（需 Velocity 端安装附属 + modern 转发）
+server-id: "lobby"  # 本服在 Velocity 网络中的唯一 id（各后端不得重复）
+secret: "change-me" # 共享密钥，须与 Velocity 端 moexdspector.properties 一致
+```
+
+`/spector reload` 一并重载。
 
 ### 语言文件 lang/zh_cn.yml
 
@@ -286,7 +295,7 @@ pass: []
 secret=change-me
 ```
 
-`secret` 必须与所有后端 `config.yml` 的 `velocity.secret` 完全一致。
+`secret` 必须与所有后端 `velocity.yml` 的 `secret` 完全一致。
 
 ---
 
@@ -347,10 +356,11 @@ secret=change-me
 
 - **插件接管**：执行 `/spector` 时自动切旁观并附身；观察者意外脱离时限时重附身；目标切服/死亡/掉线时自动跟随切换。
 - **游戏模式语义**：通过 `/spector` 进入观察后——切到**非旁观模式**（生存/创造等）= 自动退出观察（提示并保留用户选择的新模式）；切到**旁观模式** = 提示"如需退出请输入 /spector off"。不再"拽回"。
-- **用户优先**（主动接管）：关闭 `lock-spectate` 后，观察者通过旁观菜单换绑到其他玩家时视为"主动接管相机"——插件完全让出控制权：不再强制旁观、不再重附身、不再锁定输入、切换观察对象时只换监测目标不动镜头。会话监测与消息提示照常运行。
+- **用户优先**（主动接管）：关闭 `lock-spectate` 后，观察者通过旁观菜单换绑到其他玩家时视为"主动接管相机"——插件**暂时**让出相机控制（不强制旁观、不重附身、不锁定输入），但挂机检测、掉线处理、死亡切换、随机轮换等事件逻辑照常运行；**任一事件触发切换时自动恢复完全接管**（切目标并绑定镜头），手动 `next/pre` 同样恢复。注意：切换 gamemode 不触发主动接管——切非旁观直接自动退出、切旁观只是提示。
 - **输入锁定**（`check.lock-spectate: true`，默认开）：通过 `/spector` 进入的观察会话中，Shift 退出附身、左键点击其他生物换绑视角等"意外脱离"操作会被直接取消（伴随提示）——这些操作本质是客户端发 SPECTATE 传送包，插件在服务端拦截，取消瞬间客户端可能有一帧轻微闪烁。被拽回时会提示"正常退出请使用 /spector off"。需要旁观菜单自由切换时关闭该开关，或走上面的"用户优先"路径。
 - **手动步进**：`/spector next|pre` 在锁定状态下也能随意切换观察对象，是游览候选池的推荐方式。
 - **画面反馈**：进入观察与每次切换目标都会显示 Title 与 ActionBar（MiniMessage 格式、文本与开关可配，见 `feedback` 配置段），直播观众能直观看到"正在观察谁"。
+- **持续 ActionBar**：附身期间常驻显示"当前观察玩家: X"（`feedback.hold-actionbar`，默认开；文本 `hold-actionbar-text` 支持 MiniMessage 与 %target%/%mode%，主动接管期间暂停显示）。
 - **恢复**：该观察者重新执行 `/spector ...` 重置接管状态；`/spector off` 结束会话并还原 gamemode（主动接管期间结束的，不还原——用户自己管理自己的模式）。
 - `/spector status` 可查看当前是否处于主动接管状态。
 
@@ -367,7 +377,7 @@ secret=change-me
 
 ## 掉线不空窗（重连附身）
 
-> **默认关闭**：`check.relogin-reattach: false`。开启后（配合 `relogin-grace-seconds`，默认 30 秒）行为如下；关闭时目标掉线立即结束观察会话（跨服跟随不受影响）。
+> **默认关闭**：`check.relogin-reattach: false`。开启后（配合 `relogin-grace-seconds`，默认 30 秒）行为如下；关闭时目标掉线**立即切换到下一位玩家**继续观察（不等待重连），无候选人才结束会话。
 
 为直播展示设计：被观察玩家掉线时，观察画面绝不空转。以"正在观察 A，A 掉线"为例：
 
@@ -413,7 +423,7 @@ secret=change-me
 ## 常见问题
 
 **Q：跨服功能不生效，日志提示"未通过密钥校验"？**
-A：检查所有后端 `config.yml` 的 `velocity.secret` 与 Velocity 端 `moexdspector.properties` 的 `secret` 是否完全一致。
+A：检查所有后端 `velocity.yml` 的 `secret` 与 Velocity 端 `moexdspector.properties` 的 `secret` 是否完全一致。
 
 **Q：`/spector 玩家名` 提示"代理端未响应"？**
 A：Velocity 端未安装 `moexdspector-velocity` 附属、附属版本与后端不一致（协议版本被拒）、或密钥不匹配。三者逐一核对。
@@ -422,7 +432,7 @@ A：Velocity 端未安装 `moexdspector-velocity` 附属、附属版本与后端
 A：目标命中了 `pass_player.yml`、`exclude.permission` 权限节点、NPC 检测或隐身检测四者之一，按设计拒绝观察。
 
 **Q：`/spector 玩家名` 提示找不到玩家，但对方明明在线？**
-A：对方在另一个服务器且 `velocity.enabled` 未开启。开启跨服并核对密钥后即可自动跟过去。
+A：对方在另一个服务器且 `velocity.yml` 的 `enabled` 未开启。开启跨服并核对密钥后即可自动跟过去。
 
 **Q：观察者被反复传送？**
 A：插件已内置附身宽限期（≥3 秒）；若仍出现，检查是否有其他插件在竞争修改观察者的 gamemode。
@@ -445,6 +455,23 @@ A：设计约束如此。所有记录（去重列表、会话映射、server-id 
 ---
 
 ## 版本记录
+### 1.0.2
+- **修复跨服落地不在第一视角**：换服后客户端仍处于登录/维度同步阶段时 camera 包会被位置包覆盖（服务端自认已绑定、看门狗无法察觉）；现绑定后在 20/40 tick 幂等重发两次，且重发前复核会话仍在观察该目标。
+- **跨服 Tab 补全**：新增 REQ_PLAYERS/PLAYERS 协议，后端每 10 秒向代理请求全网玩家名缓存，`/spector <Tab>` 可补全其他服务器的玩家 ID。
+- **修复被观察者换服被误切旁观模式**：resumeHandoff 借道目标连接回报 PAIR 时，帧内 observer 字段误用了消息载体的 UUID，代理因此登记"目标观察自己"的幽灵会话——目标再次换服即被当作观察者切进旁观。现 PAIR 的 observer 显式取自会话，代理侧同时增加自我配对防御（拒绝并告警）。
+- **修复观察中 /spector <玩家> 后无法进入玩家视角**：attachCamera 重写时首次绑定退化为同步调用，AFK 切换等路径从目标区域线程发起导致跨线程实体操作失败（只剩贴身传送）；现首次绑定同样调度到观察者线程。会话替换时跳过"还原生存→再切旁观"的同 tick gamemode 抖动。
+- **/spector next|pre 支持跨服**：候选池合并本服玩家与代理周期下发的全网名单（统一按名字排序），步进到远程玩家时经代理观察（保留模式与去重列表）。
+- **跨服自动切换不再困在本服**：挂机切换在跨服开启时直接全网选人（本服玩家仍在候选池，同服命中走代理快速路径）；随机轮换优先本服未观察玩家、用尽后全网选人，全网轮完由代理自动开启新一轮（此前本服用尽即清空重开、永不跨服）。
+
+- **附身改为真正的玩家视角绑定**：`setSpectatorTarget` 进入目标视角（此前仅传送贴身）；目标为旁观者时回退贴身跟随，看门狗同步防重附身循环；绑定在 Folia 上调度至观察者所属线程执行。
+- **目标掉线始终立即切换**：掉线（含跨服裁决与超时兜底）一律立即切到下一位玩家；`relogin-reattach` 开关收窄为只控制"重连后自动切回"；修复无候选人结束会话时不还原观察者 gamemode 的问题。
+- **挂机无候选人提示去重**：同一目标同一次挂机期间只提醒一次，恢复活跃或切换目标后重置。
+- **/spector afk 增强**：列表按玩家聚合（次数+最近原因），`/spector afk <玩家ID>` 查看逐条明细；记录容量 20→50，支持历史玩家名 Tab 补全。
+- **跨服配置拆分**：velocity 段从 config.yml 独立为 `velocity.yml`（enabled / server-id / secret），reload 一并重载，启动日志打印 server-id 便于核对。
+- **修复跨服功能不可用**：Velocity 附属此前未通过 `ChannelRegistrar` 注册 `moexd:spector` 通道，代理端收不到后端的任何插件消息（PAIR/OBSERVE 全部失效、后端 5 秒超时）。现于 ProxyInitializeEvent 注册通道，启动日志可见"插件消息通道已注册"。
+- **修复跨服后观察对象变成自己**：HANDOFF 消息可能经观察者（而非目标）的连接到达后端，此前按"接收连接的玩家即目标"识别，导致跨服后目标被误判为观察者本人；现目标 UUID 作为显式字段随 HANDOFF 传输。
+- **修复跨服消息帧错位（致命）**：后端发出的 PAIR/UNPAIR/OBSERVE/FORCE_STOP 缺少 serverId 字段导致代理端解析全部异常丢包；HANDOFF 多写 target 字段导致后端密钥校验必然失败。已在协议文件中固化逐消息帧格式表，两端写入与解析严格对照。
+
 ### 1.0.1
 
 - **修复**：连点器检测（规则 3）从未真正触发的预存缺陷——streak 被位置移动误清零，现仅在视角移动时清零（重构为纯规则机时由单元测试捕获）。
@@ -458,7 +485,7 @@ A：设计约束如此。所有记录（去重列表、会话映射、server-id 
 - 首个版本，目标 Folia 26.2（folia-api 26.2.build.7-beta），Velocity 附属基于 velocity-api 4.2.0。
 - `/spector <玩家|random|status|afk|off|reload>` 指令与 Tab 补全，管理侧（reload / off <玩家>）支持控制台。
 - 挂机检测：原地静止 15s / 容器挂机 30s（视角移动重置）/ 连点器特征（移动+视角冻结+重复动作）/ 打字挂机（聊天降级信号，默认 10s，可关）。
-- 挂机自动切换观察对象；AFK 无候选人时明确提示而非误报切换；`/spector afk` 近期判定报告。
+- 挂机自动切换观察对象；AFK 无候选人时明确提示而非误报切换；`/spector afk [玩家ID]` 挂机判定汇总（按玩家聚合）与单玩家明细。
 - 随机轮换模式，本轮内不重复；跨服轮换去重列表连续。
 - 死亡立即切换；复活窗口（默认 3s，可关）内自动附身回去。
 - **掉线不空窗**（`check.relogin-reattach`，**默认关闭**）：目标掉线立即切到下一位玩家，宽限期内（默认 30s）重连自动切回（多观察者多播），桥接目标从本轮去重名单移除、重新可被随机选中；超时不掐断直播，继续观察桥接目标。跨服退出先等待代理裁决（HANDOFF=跟随 / TARGET_GONE=掉线），避免与跟随机制冲突。
@@ -472,6 +499,6 @@ A：设计约束如此。所有记录（去重列表、会话映射、server-id 
 - 观察结束自动还原观察者 gamemode（/spector off 场景；切模式退出则保留用户选择）。
 - **多观察者支持**：会话按观察者隔离，多人可同时附身同一目标，采样按目标共享，跨服跟随/移交/掉线全部多播。
 - **豁免体系**：NPC metadata 检测、隐身玩家检测、`pass_player.yml` 豁免名单（玩家名/UUID，支持热重载）、自定义豁免权限节点（默认关闭）。
-- Velocity 跨服：跟随目标切服、指令跨服使用、全网随机选人（排除观察者）、去重列表跨服连续、HANDOFF 到达确认、传送失败回执、5 秒无响应提示、跨服裁决状态、管理指令跨服转发（FORCE_STOP/STOP）。
+- Velocity 跨服：跟随目标切服、指令跨服使用、全网随机选人（排除观察者；挂机切换同样全网选人，全网轮完自动开新一轮）、去重列表跨服连续、HANDOFF 到达确认、传送失败回执、5 秒无响应提示、跨服裁决状态、管理指令跨服转发（FORCE_STOP/STOP）。
 - 安全：共享密钥常量时间校验、代理方向过滤、协议版本号校验。
 - 工程质量：协议契约一致性测试（JUnit 5，构建期比对两端协议文件），关键动作 INFO 日志；核心挂机规则机为纯逻辑类（`AfkRuleEvaluator`），四条规则的触发/重置/优先级由 16 个单元测试覆盖（拆分过程中发现并修复了连点器 streak 被位置移动误清零、导致规则 3 从未触发的预存 bug）。

@@ -31,6 +31,8 @@ final class ObserverSession {
     ScheduledTask victimExpiryTask;
     ScheduledTask rotationTask;
     ScheduledTask watchdogTask;
+    /** 附身期间持续 ActionBar 的刷新任务（观察者调度器，每 2 秒） */
+    ScheduledTask holdActionBarTask;
     /** 目标退出网络后等待其重连的宽限状态（非 null 表示正在等待） */
     UUID pendingReloginTarget;
     ScheduledTask reloginExpiryTask;
@@ -41,6 +43,9 @@ final class ObserverSession {
     final Set<UUID> ignoredTargets = new HashSet<>();
     /** spectate-hint 上次提示时刻（节流用） */
     long lastSpectateHintAt;
+    /** 已发送过"挂机但无候选人"提示的目标：同一目标持续挂机时只提醒一次，
+     *  目标恢复活跃（采样 NONE）或成功切换目标后重置 */
+    UUID afkNoCandidateTarget;
 
     ObserverSession(UUID observerId) {
         this.observerId = observerId;

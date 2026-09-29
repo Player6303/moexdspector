@@ -51,7 +51,13 @@ public final class SpectorCommand implements TabExecutor {
                 plugin.reloadConfigs();
                 sender.sendMessage(plugin.msg("reloaded"));
             }
-            case "afk" -> sender.sendMessage(String.join("\n", manager.afkReportLines()));
+            case "afk" -> {
+                if (args.length >= 2) {
+                    sender.sendMessage(String.join("\n", manager.afkDetailLines(args[1])));
+                } else {
+                    sender.sendMessage(String.join("\n", manager.afkReportLines()));
+                }
+            }
             case "off" -> {
                 if (args.length >= 2) {
                     // 强制断开指定观察者的会话（需管理权限，控制台可用）
@@ -127,7 +133,19 @@ public final class SpectorCommand implements TabExecutor {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String label, String[] args) {
         List<String> completions = new ArrayList<>();
-        if (!sender.hasPermission("moexdspector.use") || args.length != 1) {
+        if (!sender.hasPermission("moexdspector.use")) {
+            return completions;
+        }
+        if (args.length == 2 && args[0].toLowerCase(Locale.ROOT).equals("afk")) {
+            String prefix = args[1].toLowerCase(Locale.ROOT);
+            for (String name : manager.afkKnownPlayers()) {
+                if (name.toLowerCase(Locale.ROOT).startsWith(prefix)) {
+                    completions.add(name);
+                }
+            }
+            return completions;
+        }
+        if (args.length != 1) {
             return completions;
         }
         String prefix = args[0].toLowerCase(Locale.ROOT);
@@ -143,6 +161,15 @@ public final class SpectorCommand implements TabExecutor {
         for (Player online : Bukkit.getOnlinePlayers()) {
             if (online.getName().toLowerCase(Locale.ROOT).startsWith(prefix)) {
                 completions.add(online.getName());
+            }
+        }
+        // 跨服开启时补全全网玩家名（代理周期下发的缓存，含本服）
+        if (bridge != null && bridge.enabled()) {
+            for (String name : bridge.networkPlayerNames()) {
+                if (name.toLowerCase(Locale.ROOT).startsWith(prefix)
+                        && completions.stream().noneMatch(c -> c.equalsIgnoreCase(name))) {
+                    completions.add(name);
+                }
             }
         }
         return completions;

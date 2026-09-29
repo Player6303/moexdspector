@@ -18,7 +18,7 @@ messages:
   spectate-hint: "&7你已处于观察者模式中，如需退出请输入 &f/spector off&7。"
   stopped: "&7已停止观察。"
   admin-stopped: "&a已强制结束 &f%target% &a的观察会话。"
-  voluntary-pause: "&7检测到你主动进入观察状态，插件已暂停接管相机（重新执行 &f/spector&7 可恢复）。"
+  voluntary-pause: "&7检测到你主动进入观察状态，插件已暂停接管相机。挂机/掉线等事件发生时会自动恢复接管；重新执行 &f/spector&7 或 &fnext/pre&7 也可立即恢复。"
 
   # 观察与切换
   observing: "&a正在观察玩家 &f%target%&a。"
@@ -41,6 +41,7 @@ messages:
   # 掉线/重连
   relogin-reattach: "&a观察对象 &f%target% &a已重新上线，恢复观察。"
   relogin-switch: "&e观察对象 &f%target% &e掉线，暂时切换到 &f%newtarget%&e（其重连后自动切回）。"
+  target-quit-switch: "&e观察对象 &f%target% &e已掉线，切换到 &f%newtarget%&e。"
   relogin-abandoned: "&e已放弃等待 &f%target%&e：本会话内不再自动切回，也不会再被随机选中。"
   relogin-expired: "&7观察对象 &f%target% &7未在宽限期内重连，继续观察当前玩家。"
 
@@ -49,9 +50,13 @@ messages:
   status-idle: "&7当前没有进行中的观察会话。"
   status-relogin: "&e观察对象 &f%target% &e已退出网络，正在等待其在宽限期内重连……"
   status-verdict: "&e观察对象 &f%target% &e已离开本服，正在等待代理裁决去向……"
-  afk-list-header: "&b—— 近期挂机判定 ——"
+  afk-list-header: "&b—— 挂机判定汇总 ——"
   afk-list-empty: "&7近期没有挂机判定记录。"
-  afk-list-entry: "&f%player% &7- %reason% &8(%time% 秒前)"
+  afk-list-entry: "&f%player% &7×%count% 次 &8| &7最近: %reason% &8(%time% 秒前)"
+  afk-detail-header: "&b—— %target% 的挂机判定明细 ——"
+  afk-detail-summary: "&7共 %count% 条，最早一条在 %span% 秒前"
+  afk-detail-entry: "&8[%time% 秒前] &7%reason%"
+  afk-detail-empty: "&c%target% 近期没有挂机判定记录。"
 
 reasons:
   stationary: "原地静止超过 %seconds% 秒"
@@ -65,6 +70,7 @@ feedback:
   title-text: "<gradient:#00e0ff:#ffffff>正在观察</gradient> <yellow><bold>%target%</bold>"
   title-subtitle: "<gray>%reason%"
   actionbar-text: "<gray>观察中: <white>%target% <dark_gray>· %reason% · %mode%"
+  hold-actionbar-text: "<gray>当前观察玩家: <white><bold>%target%</bold> <dark_gray>· %mode%"
 
   # 各切换事件的 %reason% 文案
   feedback-reasons:

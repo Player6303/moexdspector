@@ -1,5 +1,5 @@
 name: moexdspector
-version: 1.0.1
+version: 1.0.2
 main: com.moexd.spector.MoexdSpectorPlugin
 api-version: '26.2'
 folia-supported: true

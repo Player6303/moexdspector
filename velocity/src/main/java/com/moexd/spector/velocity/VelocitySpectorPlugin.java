@@ -6,6 +6,7 @@ import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.PluginMessageEvent;
 import com.velocitypowered.api.event.player.ServerPostConnectEvent;
+import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.Player;
@@ -48,7 +49,7 @@ import java.util.concurrent.ThreadLocalRandom;
 @Plugin(
         id = "moexdspector",
         name = "moexdspector",
-        version = "1.0.1",
+        version = "1.0.2",
         description = "Server-follow companion for the moexdspector Folia plugin",
         authors = {"moexd"}
 )
@@ -78,6 +79,16 @@ public final class VelocitySpectorPlugin {
         this.proxy = proxy;
         this.logger = logger;
         loadSecret(dataDirectory);
+    }
+
+    /**
+     * 注册插件消息通道。Velocity 只有在代理端注册通道后，才会把后端发往 moexd:spector
+     * 的消息交给 PluginMessageEvent（否则直接转发给客户端，跨服功能完全失效）。
+     */
+    @Subscribe
+    public void onProxyInitialize(ProxyInitializeEvent event) {
+        proxy.getChannelRegistrar().register(CHANNEL);
+        logger.info("插件消息通道已注册: moexd:spector");
     }
 
     private void loadSecret(Path dataDirectory) {
@@ -129,6 +140,11 @@ public final class VelocitySpectorPlugin {
             switch (sub) {
                 case SpectorProtocol.PAIR -> {
                     UUID target = UUID.fromString(in.readUTF());
+                    if (observer.equals(target)) {
+                        // 防御：自我配对必然是数据污染（历史上借道连接误报 observer 所致），拒绝登记
+                        logger.warn("[{}] 收到自我配对的 PAIR（observer==target={}），已忽略", serverId, observer);
+                        return;
+                    }
                     String mode = in.readUTF();
                     String used = in.readUTF();
                     if (!verifySecret(in)) {
@@ -159,6 +175,13 @@ public final class VelocitySpectorPlugin {
                         return;
                     }
                     handleObserve(serverId, observer, mode, targetName, used);
+                }
+                case SpectorProtocol.REQ_PLAYERS -> {
+                    if (verifySecret(in)) {
+                        replyPlayers((ServerConnection) event.getSource());
+                    } else {
+                        logger.warn("[{}] 收到未通过密钥校验的 REQ_PLAYERS，已忽略（可能存在伪造）", serverId);
+                    }
                 }
                 case SpectorProtocol.FORCE_STOP -> {
                     if (!verifySecret(in)) {
@@ -199,6 +222,15 @@ public final class VelocitySpectorPlugin {
             for (Player online : proxy.getAllPlayers()) {
                 if (!online.getUniqueId().equals(observerId) && !excluded.contains(online.getUniqueId())) {
                     candidates.add(online);
+                }
+            }
+            if (candidates.isEmpty() && !excluded.isEmpty()) {
+                // 全网玩家都已观察过一轮：排除列表清零、开启新一轮（兑现"轮完才重复"的承诺）
+                logger.info("全网玩家已观察完一轮，随机轮换开启新一轮");
+                for (Player online : proxy.getAllPlayers()) {
+                    if (!online.getUniqueId().equals(observerId)) {
+                        candidates.add(online);
+                    }
                 }
             }
             targetOpt = candidates.isEmpty()
@@ -250,6 +282,30 @@ public final class VelocitySpectorPlugin {
                     }
                     // 成功时 HANDOFF 由 onServerPostConnect（观察者到达）补发
                 });
+    }
+
+    /** 回复全网玩家名列表（Tab 补全用） */
+    private void replyPlayers(ServerConnection via) {
+        try {
+            StringBuilder csv = new StringBuilder();
+            for (Player online : proxy.getAllPlayers()) {
+                if (csv.length() > 0) {
+                    csv.append(',');
+                }
+                csv.append(online.getUsername());
+            }
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            DataOutputStream out = new DataOutputStream(bos);
+            out.writeUTF(SpectorProtocol.VERSION);
+            out.writeUTF(SpectorProtocol.PLAYERS);
+            out.writeUTF("proxy");
+            out.writeUTF(UUID.randomUUID().toString()); // 帧格式占位 observer
+            out.writeUTF(csv.toString());
+            out.writeUTF(secret);
+            via.sendPluginMessage(CHANNEL, bos.toByteArray());
+        } catch (IOException e) {
+            logger.warn("Failed to send PLAYERS", e);
+        }
     }
 
     /** 管理指令跨服转发：注销该观察者的代理会话，并通知其所在后端结束本地会话 */
@@ -327,6 +383,9 @@ public final class VelocitySpectorPlugin {
 
     private void sendHandoff(ServerConnection via, String serverId, UUID observer, String mode,
                              String usedCsv, UUID target) {
+        // 帧格式与后端解析严格对应：VERSION, HANDOFF, serverId, observer, mode, usedCsv, target, secret
+        // （target 必须显式传输：消息可能经观察者而非目标的连接到达，
+        //  依赖接收方身份识别目标曾在多观察者场景下把观察者自己当成目标）
         try {
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             DataOutputStream out = new DataOutputStream(bos);
